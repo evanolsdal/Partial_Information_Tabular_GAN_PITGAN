@@ -1,4 +1,6 @@
 import tensorflow as tf
+import math
+from tabulate import tabulate
 
 """
 This section creates custom Gumbel Sigmoid and Gumbel Softmax activation functions and the procedures to 
@@ -23,7 +25,8 @@ Functions used to apply the different types of softmax to the generators categor
 to generate either probabilities or discrete outputs 
 """
 
-# Application process for regular softmax for the generator output
+# Application process for regular softmax for the generator output if output is sharp this means we
+# make the output discrete
 def apply_regular_softmax(generator_output, D_list, C_list):
 
     start_idx = 0
@@ -79,6 +82,12 @@ def sample_gumbel(shape):
 # Custom activation function for gumbel sigmoid
 def gumbel_sigmoid(logits, temperature):
 
+    # make sure inputs are non empty
+    if logits is None:
+        raise ValueError("Logits are None, cannot apply Gumbel sigmoid.")
+    if temperature is None or temperature <= 0:
+        raise ValueError("Invalid temperature value.")
+
     # Get the gumbel noise
     gumbel_logits_pos = sample_gumbel(tf.shape(logits))
     gumbel_logits_neg = sample_gumbel(tf.shape(logits))
@@ -100,10 +109,8 @@ def gumbel_softmax(logits, temperature):
     # Get the gumbel noise
     gumbel_logits = sample_gumbel(tf.shape(logits))
 
-    # Add gumbel noise and apply softmax
-
     # Add the gumbel noise and apply softmax to get the soft probabilities
-    y = (logits + gumbel_noise) / temperature
+    y = (logits + gumbel_logits) / temperature
     soft_output = tf.nn.softmax(y)
 
     # Use the soft probabilities to sample hard one-hots for feed forward
@@ -119,7 +126,7 @@ def gumbel_softmax(logits, temperature):
 Some other misc helper functions
 """
 
-# gets one instance of a batch from the data
+# Gets one instance of a batch from the data
 def batch_data(x_train, batch_size):
 
     batch = tf.data.Dataset.from_tensor_slices(x_train)
@@ -128,3 +135,39 @@ def batch_data(x_train, batch_size):
     batch = batch.prefetch(tf.data.AUTOTUNE)
 
     return batch
+
+
+# Noise generate noise proportially for the number of discrete and continuous variables
+def get_custom_noise(D_list, C_list, batch):
+
+    discrete_noise = tf.random.uniform((batch, len(D_list)))
+
+    continuous_noise = tf.random.normal((batch, len(C_list)))
+
+    noise = tf.concat([discrete_noise, continuous_noise], axis=-1)
+
+    return noise
+
+def get_latent_dims(D_list, C_list):
+    # Calculate the product of dimensions
+    total_arrangements = math.prod(D_list + C_list)
+
+    # List of tuples to store the latent dimension, number of states covered, and the number of states remaining
+    info = [("Latent Dim", "States Covered", "States Remaining")]
+    info.append((0, 0, total_arrangements))
+
+    # Compute arrangements of the latent space, starting with 2 and increasing increments by two
+    latent_arrangements = 2
+    latent_dim = 1
+
+    while total_arrangements > 0:
+        total_arrangements -= latent_arrangements
+        info.append((latent_dim, latent_arrangements, max(0, total_arrangements)))
+        latent_arrangements *= 2
+        latent_dim += 1
+
+    # Print using tabulate
+    print(tabulate(info, headers="firstrow", tablefmt="grid"))
+
+
+

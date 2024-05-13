@@ -1,5 +1,5 @@
 import tensorflow as tf
-from tensorflow.keras import layers
+from tensorflow.keras import layers, Model
 
 
 """
@@ -19,7 +19,7 @@ def build_encoder(D_list, C_list, L, dim_e):
     total_input_dims = sum(D_list) + sum(C_list)
     
     # Input layer for the concatenated vector of all discrete features
-    input_layer = Input(shape=(total_input_dims,), name='encoder_input')
+    input_layer = layers.Input(shape=(total_input_dims,), name='encoder_input')
 
     # Initialize a list to hold embeddings
     embeddings = []
@@ -29,20 +29,29 @@ def build_encoder(D_list, C_list, L, dim_e):
 
     # Embeddings for categorical variables
     for i, d_i in enumerate(D_list):
-        cat_slice = layers.Lambda(lambda x: x[:, start_idx:start_idx+d_i])(input_layer)
-        cat_embed = layers.Dense(d_i-1, activation='linear', name=f'cat_embed_{i}')(cat_slice)
+
+        cat_slice = layers.Lambda(lambda x, start, end: x[:, start:end],
+                                output_shape=(d_i,),
+                                arguments = {'start': start_idx, 'end': start_idx + d_i},
+                                name=f'cat_slice_{i+1}')(input_layer)
+        cat_embed = layers.Dense(d_i-1, activation='linear', name=f'cat_embed_{i+1}')(cat_slice)
         embeddings.append(cat_embed)
         start_idx += d_i
 
     # Embeddings for modes of continuous variables
     for i, m_i in enumerate(C_list):
-        mode_slice = layers.Lambda(lambda x: x[:, start_idx:start_idx+m_i])(input_layer)
-        mode_embed = layers.Dense(m_i-1, activation='linear', name=f'mode_embed_{i}')(mode_slice)
+
+        mode_slice = layers.Lambda(lambda x, start, end: x[:, start:end],
+                                output_shape=(m_i,),
+                                arguments = {'start': start_idx, 'end': start_idx + m_i},
+                                name=f'mode_slice_{i+1}')(input_layer)
+        mode_embed = layers.Dense(m_i-1, activation='linear', name=f'mode_embed_{i+1}')(mode_slice)
         embeddings.append(mode_embed)
         start_idx += m_i
 
+
     # Combine all embeddings
-    x = layers.Concatenate()(embeddings)
+    x = layers.Concatenate(name = 'embed_concat')(embeddings)
 
     # Process combined embeddings through dense hidden layers as dictated by dim_e
     for i, size in enumerate(dim_e):
@@ -70,7 +79,7 @@ def build_decoder(D_list, C_list, L, dim_r):
     
     
     # Input layer from the latent space
-    latent_input = Input(shape=(L,), name='latent_input')
+    latent_input = layers.Input(shape=(L,), name='input_latent')
 
     # Dense layers processing the latent representation
     x = latent_input
@@ -82,16 +91,16 @@ def build_decoder(D_list, C_list, L, dim_r):
 
     # Output for categorical variables using Dense layer with softmax activation
     for i, d_i in enumerate(D_list):
-        cat_output = layers.Dense(d_i, activation='softmax', name=f'cat_output_{i}')(x)
+        cat_output = layers.Dense(d_i, activation='softmax', name=f'cat_output_{i+1}')(x)
         output_layers.append(cat_output)
 
     # Output for continuous variables using Dense layer with softmax activation
     for i, m_i in enumerate(C_list):
-        cat_output = layers.Dense(m_i, activation='softmax', name=f'mode_output_{i}')(x)
+        cat_output = layers.Dense(m_i, activation='softmax', name=f'mode_output_{i+1}')(x)
         output_layers.append(cat_output)
 
     # Combine all outputs 
-    output_layer = Concatenate()(enumerate)
+    output_layer = layers.Concatenate(name = 'output_concat')(output_layers)
 
     # Define the decoder model
     decoder = Model(inputs=latent_input, outputs=output_layer, name="decoder")
@@ -112,17 +121,23 @@ def build_decoder(D_list, C_list, L, dim_r):
     - dim_g: List containing the dimensions for each hidden layer
 """
 
-def build_generator(R, L, D_list, C_list, dim_g):
+def build_generator(R, L, D_list, C_list, dim_g, scale_noise):
     
     # Inputs
-    input_noise = layers.Input(shape=(R,))
-    input_latent = layers.Input(shape=(L,))
-    x = layers.Concatenate()([input_noise, input_latent])
+    input_noise = layers.Input(shape=(R,), name = 'input_noise')
+    input_latent = layers.Input(shape=(L,), name = 'input_latent')
+
+    # Scale the input noise
+    input_noise_scaled = layers.Lambda(lambda x: x*scale_noise, name='noise_scaled')(input_noise)
+
+    # Combine to form one input
+    x = layers.Concatenate(name = 'input_concat')([input_noise_scaled, input_latent])
 
     total_discrete_dims = sum(D_list) + sum(C_list)
 
     # Iteratively add the shared dense layers as dictated by dim_g up 
     for i, size in enumerate(dim_g):
+        x = layers.Concatenate(name = f'hidden_concat_{i+1}')([x, input_latent])
         x = layers.Dense(size, activation='relu', name=f'hidden_layer_{i+1}')(x)
 
     # Outputs for categorical and continuous variables as logits from linear layer, to be processed later as 
@@ -130,12 +145,11 @@ def build_generator(R, L, D_list, C_list, dim_g):
     # or the encoder (for supervised loss) respectively
     discrete_output = layers.Dense(total_discrete_dims, activation='linear', name='output_logits')(x)
 
-    # For the continuous part of the representation we use a scaled tanh in order to make the scaled output range 
-    # match the true range more accurately while still incorporating a bounding restraint on this output
-    continuous_output = layers.Dense(length(C_list), activation=lambda x: 3.0*tf.math.tanh(x), name='output_continuous')(x)
+    # Output the continuous parts using tanh, add extra hidden layer for the continuous output
+    continuous_output = layers.Dense(len(C_list), activation='tanh', name='output_continuous')(x)
 
     # Combine all outputs
-    output_layer = Concatenate()([discrete_output, continuous_output])
+    output_layer = layers.Concatenate(name = 'output_concat')([discrete_output, continuous_output])
 
     # Define and return the generator model
     generator = Model(inputs=[input_noise, input_latent], outputs=output_layer, name="generator")
@@ -158,55 +172,68 @@ def build_generator(R, L, D_list, C_list, dim_g):
     - dim_d: List containing the dimensions for each hidden layer
     - L: Dimensionality of the latent space
 """
-def build_critic(D_list, C_list, dim_d, L):
+def build_critic(D_list, C_list, dim_d, L, scale_discrete):
     
     D = sum(D_list)
     C = sum(C_list)
-    c = length(C_list)
+    c = len(C_list)
 
     total_input_dim = D + C + c
+    total_discrete_dim = D + C
 
     # Single concatenated input from P_r
-    input_raw = layers.Input(shape=(total_input_dim,), name='raw_input')
-
-     # Additional input for the latent space P_l
-    input_latent = layers.Input(shape=(L,), name='latent_input')
+    input_raw = layers.Input(shape=(total_input_dim,), name='input_raw')
+    
+    # Extract the continuous and discrete inputs separately
+    input_continuous = layers.Lambda(lambda x: x[:, :total_discrete_dim],
+                                    name='input_discrete_slice')(input_raw)
+    
+    # Additional input for the latent space P_l
+    input_latent = layers.Input(shape=(L,), name='input_latent')
 
     # Process categorical variables
     categorical_embeddings = []
     start_idx = 0
     for i, d_i in enumerate(D_list):
-        end_idx = start_idx + d_i
-        # Slice for categories of ith categorical variable
-        cat_slice = layers.Lambda(lambda x: x[:, start_idx:end_idx])(input_raw)
-        # Process slice with Dense layer
-        cat_dense = layers.Dense(d_i-1, activation='linear', name=f'cat_embed_{i}')(cat_slice)
+        cat_slice = layers.Lambda(lambda x, start, end: x[:, start:end],
+                                output_shape=(d_i,),
+                                arguments = {'start': start_idx, 'end': start_idx + d_i},
+                                name=f'cat_slice_{i+1}')(input_raw)
+        cat_slice_scaled = layers.Lambda(lambda x: x*scale_discrete, name = f'cat_slice_scaled_{i+1}')(cat_slice)
+        cat_dense = layers.Dense(d_i-1, activation='relu', name=f'cat_embed_{i+1}')(cat_slice_scaled)
         categorical_embeddings.append(cat_dense)
-        start_idx = end_idx
+        start_idx += d_i
+
 
     # Process modes for continuous variables and the continuous variables themselves
     continuous_embeddings = []
      # Calculate the starting index for the continuous part
     start_continuous_idx = D + C
     for i, m_i in enumerate(C_list):
-        end_idx = start_idx + m_i
-        # Slice for modes of  ith continuous variable
-        mode_slice = layers.Lambda(lambda x: x[:, start_idx:end_idx])(input_raw)
-        # Slice for ith continuous variable
-        continuous_slice_i = layers.Lambda(lambda x: x[:, start_continuous_idx + i:start_continuous_idx + i + 1])(input_raw)
-        # Combine mode slice and corresponding continuous slice
-        combined_slice = layers.Concatenate()([mode_slice, continuous_slice_i])
-        # Process combined slice with Dense layer
-        mode_dense = layers.Dense(m_i, activation='linear', name=f'mode_embed_{i}')(combined_slice)
+        # Get mode slice
+        mode_slice = layers.Lambda(lambda x, start, end: x[:, start:end],
+                                    output_shape=(m_i,),
+                                    arguments = {'start': start_idx, 'end': start_idx + m_i},
+                                    name=f'mode_slice_{i+1}')(input_raw)
+        mode_slice_scaled = layers.Lambda(lambda x: x*scale_discrete, name = f'mode_slice_scaled_{i+1}')(mode_slice)
+        # Get continuous variable slice
+        continuous_slice = layers.Lambda(lambda x, start, end: x[:, start:end],
+                                            output_shape=(1,),
+                                            arguments = {'start': start_continuous_idx + i, 'end': start_continuous_idx + i+1},
+                                            name=f'cont_slice_{i+1}')(input_raw)
+        combined_slice = layers.Concatenate(name=f'continuous_concat_{i+1}')([mode_slice_scaled, continuous_slice])
+        mode_dense = layers.Dense(m_i, activation='relu', name=f'mode_embed_{i+1}')(combined_slice)
         continuous_embeddings.append(mode_dense)
-        start_idx = end_idx
+        start_idx += m_i
+
 
     # Combine all processed parts
-    combined_input = layers.Concatenate()([*categorical_embeddings, *continuous_embeddings, input_latent])
+    combined_input = layers.Concatenate(name = 'input_concat')([*categorical_embeddings, *continuous_embeddings, input_continuous, input_latent])
 
     # # Iteratively add the shared dense layers as dictated by dim_d up 
     x = combined_input
     for i, size in enumerate(dim_d):
+        x = layers.Concatenate(name = f'hidden_concat_{i+1}')([x, input_latent])
         x = layers.Dense(size, activation='leaky_relu', name=f'hidden_layer_{i+1}')(x)
 
     # Output layer as real value
