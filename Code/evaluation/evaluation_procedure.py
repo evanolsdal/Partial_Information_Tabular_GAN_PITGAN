@@ -134,7 +134,8 @@ def evaluate_full(X_train, transformer, discrete_columns, latent_dims, hidden_di
         }
         # Add the privacy measured for each set of keys
         for keys in privacy['Num_Keys'].unique():
-            results[keys] = privacy[privacy['Num_Keys']==keys]['TCAP'].mean()
+            results[keys + '_TCAP'] = privacy[privacy['Num_Keys']==keys]['TCAP'].mean()
+            results[keys + '_TCAP_raw'] = privacy[privacy['Num_Keys']==keys]['TCAP_raw'].mean()
 
         # Also add the optimal parameters for this latent dim
         optimal_params_selected = {'Latent_dim': latent_dim}
@@ -196,7 +197,8 @@ def evaluate(X_train, model, transformer, discrete_columns, utility_weights, key
 
     # Add the privacy measured for each set of keys
     for keys in privacy['Num_Keys'].unique():
-        results[keys] = privacy[privacy['Num_Keys']==keys]['TCAP'].mean()
+        results[keys + '_TCAP'] = privacy[privacy['Num_Keys']==keys]['TCAP'].mean()
+        results[keys + '_TCAP_raw'] = privacy[privacy['Num_Keys']==keys]['TCAP_raw'].mean()
 
     results = [results]
 
