@@ -33,6 +33,7 @@ def compute_TCAP(data_real, data_synth, list_of_keys, transformer, WEAP_threshol
 
             if susceptible_records.empty:
                 average_tcap = 0
+                full_tcap = 0
             else:
                 # Calculate TCAP by applying weap calculation but to the real dataset
                 real_keys_group = data_real.groupby(keys).size().reset_index(name='total_real')
@@ -47,12 +48,13 @@ def compute_TCAP(data_real, data_synth, list_of_keys, transformer, WEAP_threshol
                 # Calculate the average TCAP for this target
                 total_susceptible = tcap_merged['count_synth'].sum()
                 average_tcap = tcap_merged['TCAP_full'].sum() / total_susceptible 
+                full_tcap = tcap_merged['TCAP_full'].sum()
 
             # Store results
             global_results_list.append({
                 'Variable': target, 
                 'TCAP': average_tcap, 
-                'TCAP_raw': tcap_merged['TCAP_full'].sum(),
+                'TCAP_raw': full_tcap,
                 'Num_Keys': f"{len(keys)}-keys"
             })
 
