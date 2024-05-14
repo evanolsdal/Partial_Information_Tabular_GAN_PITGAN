@@ -52,7 +52,7 @@ def compute_TCAP(data_real, data_synth, list_of_keys, transformer, WEAP_threshol
             global_results_list.append({
                 'Variable': target, 
                 'TCAP': average_tcap, 
-                'TCAP_raw': tcap_merged['TCAP_full'].sum()
+                'TCAP_raw': tcap_merged['TCAP_full'].sum(),
                 'Num_Keys': f"{len(keys)}-keys"
             })
 
