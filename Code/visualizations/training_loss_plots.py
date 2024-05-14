@@ -20,7 +20,6 @@ def plot_losses(losses, subgraphs):
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.legend()
-    plt.ylim(bottom=0)  # Ensure the y-axis starts at 0
     plt.show()
 
 

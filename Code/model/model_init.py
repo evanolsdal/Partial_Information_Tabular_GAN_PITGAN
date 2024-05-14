@@ -227,7 +227,8 @@ class PITGAN(Model):
             # Combine the loss functions into one loss using the weight hyper parameter to balance the two losses,
             # where we decrease the the influence of the supervised loss as training progresses
             # (note that unsupervised loss is negated in order to maximize it when performing gradient descent)
-            alpha_sup = self.alpha_sup - ((epoch+1)/epochs)*self.alpha_sup
+            # alpha_sup = self.alpha_sup - ((epoch+1)/epochs)*self.alpha_sup
+            alpha_sup = self.alpha_sup
 
             generator_loss = -unsupervised_loss + alpha_sup*supervised_loss
 
