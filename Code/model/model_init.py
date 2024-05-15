@@ -129,7 +129,7 @@ class PITGAN(Model):
     """
 
     # Gradient step for the latent autoencoder
-    def train_autoencoder_step(self, X):
+    def train_autoencoder_step(self, X, with_gumbel):
 
         # Get only the discrete features of X
         total_discrete_dims = sum(self.D_list) + sum(self.C_list)
@@ -143,7 +143,11 @@ class PITGAN(Model):
             # Compute the latent encoding and the recovered encoding. Note that we use gumbel sigmoid in this step
             # to make the latent output "discrete" during training
             Y_hat_logits = self.encoder(X, training = True)
-            Y_hat = gumbel_sigmoid(Y_hat_logits, self.sigmoid_temp)
+
+            if with_gumbel:
+                Y_hat = gumbel_sigmoid(Y_hat_logits, self.sigmoid_temp)
+            else:
+                Y_hat = tf.nn.sigmoid(Y_hat_logits)
 
             X_hat = self.decoder(Y_hat, training = True)
 
@@ -170,7 +174,7 @@ class PITGAN(Model):
 
     # Gradient step for the generator. Note throughout that we try to make the optimization criteria for the generator
     # as differentiable as possible to help mitigate the complexity of the gradient computations in this step.
-    def train_generator_unsup_step(self, X, epoch, epochs):
+    def train_generator_unsup_step(self, X, with_gumbel):
 
         # Get the number of continuous variables, and scale the last c rows of X
         c = len(self.C_list)
@@ -201,7 +205,13 @@ class PITGAN(Model):
             # on the generator output to simulate discrete sampeling. We also apply regular sigmoid to the output of the 
             # encoder for the latent variables, as this will make for a smoother optimization criteria with respect 
             # to the generator parameters for the BCE loss later on
-            X_hat_b = apply_gumbel_softmax(X_hat_logits, self.D_list, self.C_list, self.softmax_temp)
+            # Compute the estimated latent space of this output
+            if with_gumbel:
+                X_hat_b = apply_gumbel_softmax(X_hat_logits, self.D_list, self.C_list, self.softmax_temp)
+            else:
+                X_hat = apply_regular_softmax(X_hat_logits, self.D_list, self.C_list)
+                X_hat_b = X_hat_b[:, :total_discrete_dims]
+
             Y_hat = self.encoder(X_hat_b)
             Y_hat = tf.nn.sigmoid(Y_hat)
 
@@ -357,7 +367,7 @@ class PITGAN(Model):
     """
 
     # Full traing procedure for the encoder decoder training
-    def fit_autoencoder(self, X_data, epochs):
+    def fit_autoencoder(self, X_data, with_gumbel, epochs):
 
         # Before training transform the data for proper use
         X_data = self.transformer.transform(X_data)
@@ -381,7 +391,7 @@ class PITGAN(Model):
             for batch in batched_data:
 
                 # Run the gradient step
-                reconstruction_loss_step = self.train_autoencoder_step(batch)
+                reconstruction_loss_step = self.train_autoencoder_step(batch, with_gumbel)
 
                 # Add the reconstruction loss to the epoch losses
                 epoch_losses.append(reconstruction_loss_step)
@@ -448,7 +458,7 @@ class PITGAN(Model):
 
 
     # Full training procedure for the generator and critic
-    def fit_generative(self, X_data, epochs):
+    def fit_generative(self, X_data, with_gumbel, epochs):
 
         # Before training transform the data for proper use
         X_data = self.transformer.transform(X_data)
@@ -504,7 +514,7 @@ class PITGAN(Model):
                     epoch_gradient_penalty_losses.append(gradient_penalty_loss)
 
                 # Run the gradient step for the generator
-                unsupervised_generator_loss, supervised_loss = self.train_generator_unsup_step(batch, epoch, epochs)
+                unsupervised_generator_loss, supervised_loss = self.train_generator_unsup_step(batch, with_gumbel)
 
                 # Add the losses to the epoch losses
                 epoch_unsupervised_generator_losses.append(unsupervised_generator_loss)
