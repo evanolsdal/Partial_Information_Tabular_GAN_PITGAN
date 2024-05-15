@@ -13,7 +13,10 @@ This file contains all of the measures of utility used
 """
 
 # Calculation of the Ration of Counts
-def compute_ROC(data_real, data_synth, transformer):
+def compute_ROC(data_real_input, data_synth_input, transformer):
+
+    data_real = data_real_input.copy()
+    data_synth = data_synth_input.copy()
 
     # First transform data to the mode representation of continuous variables
     data_real = transformer.transform_modes(data_real)
@@ -75,7 +78,10 @@ def compute_ROC(data_real, data_synth, transformer):
 
 
 # Function to calculate the confidence interval overalps
-def compute_CIO(data_original, data_synthetic, dependent, independent_continuous, independent_discrete, alpha=0.05):
+def compute_CIO(data_original_input, data_synthetic_input, dependent, independent_continuous, independent_discrete, alpha=0.05):
+
+    data_original = data_original_input.copy()
+    data_synthetic = data_synthetic_input.copy()
 
     # First subset the columns which will actually be used in the analysis and split it into the dependent and 
     # independent variables, where the independent variables are further split into the continuous and discrete parts
@@ -117,7 +123,8 @@ def compute_CIO(data_original, data_synthetic, dependent, independent_continuous
 
     # Compute the overlap of the confidence intervals for each coefficient
     overlaps = []
-    for col in ci_o.index:
+    common_columns = ci_o.index.intersection(ci_s.index)
+    for col in common_columns:
         # Get the intervals
         lower_bound = max(ci_o.loc[col, 0], ci_s.loc[col, 0])
         upper_bound = min(ci_o.loc[col, 1], ci_s.loc[col, 1])
@@ -182,7 +189,10 @@ def compute_CIO_folds(data_original, model, regressions, folds):
     return result_df
 
 # Function to compute the pMSE
-def compute_pMSE(data_original, data_synthetic, discrete_columns):
+def compute_pMSE(data_original_input, data_synthetic_input, discrete_columns):
+
+    data_original = data_original_input.copy()
+    data_synthetic = data_synthetic_input.copy()
 
     # Get the number of features and samples for the hyperparameters of the Random Forest
     num_features = calculate_features(data_original, discrete_columns)
