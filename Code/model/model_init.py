@@ -170,7 +170,7 @@ class PITGAN(Model):
 
     # Gradient step for the generator. Note throughout that we try to make the optimization criteria for the generator
     # as differentiable as possible to help mitigate the complexity of the gradient computations in this step.
-    def train_generator_step(self, X, epoch, epochs):
+    def train_generator_unsup_step(self, X, epoch, epochs):
 
         # Get the number of continuous variables, and scale the last c rows of X
         c = len(self.C_list)
@@ -238,6 +238,47 @@ class PITGAN(Model):
 
         # Return the two losses separately
         return unsupervised_loss, supervised_loss
+    
+    # Gradient step for the generator under supervised learning. 
+    def train_generator_sup_step(self, X):
+
+        # Combine the trainable variables from the encoder and decoder so they can be kept track of in the tape
+        trainable_variables = self.generator.trainable_variables
+
+        with tf.GradientTape() as tape:
+
+            # Get only the discrete features of X
+            total_discrete_dims = sum(self.D_list) + sum(self.C_list)
+            X_b = X[:, :total_discrete_dims]
+
+            # Get the latent variables from the encoder from the real samples. Note that we pass the output through the 
+            # regular sigmoid activation and make it discrete as we are now drawing actual samples from this latent space
+            Y_logits = self.encoder(X_b)
+            Y = tf.nn.sigmoid(Y_logits)
+            Y = tf.cast(tf.greater(Y, 0.5), Y.dtype)
+
+            # Use these as inputs to the generator, as well as some sampeled noise, 
+            Z = tf.random.uniform((self.batch_size, self.R))
+            X_hat_logits = self.generator([Z, Y], training=True)
+
+            # Compute the estimated latent space of this output. Note that we need to use gumbel softmax
+            # on the generator output to simulate discrete sampeling. We also apply regular sigmoid to the output of the 
+            # encoder for the latent variables, as this will make for a smoother optimization criteria with respect 
+            # to the generator parameters for the BCE loss later on
+            X_hat_b = apply_gumbel_softmax(X_hat_logits, self.D_list, self.C_list, self.softmax_temp)
+            Y_hat = self.encoder(X_hat_b)
+            Y_hat = tf.nn.sigmoid(Y_hat)
+            
+            # Compute the Binary Cross Entropy between the generators latent output and the latent output it was 
+            # conditioned on
+            supervised_loss = self.BCE(Y, Y_hat)
+
+        # Compute the gradients an update the weights
+        grads = tape.gradient(supervised_loss, trainable_variables)
+        self.generator_optimizer.apply_gradients(zip(grads, trainable_variables))
+
+        # Return the two losses separately
+        return supervised_loss
 
 
     # Gradient step for the critic
@@ -357,6 +398,52 @@ class PITGAN(Model):
         }
 
         return losses
+    
+    # Full traing procedure for the encoder decoder training
+    def fit_latent(self, X_data, epochs):
+
+        # Before training transform the data for proper use
+        X_data = self.transformer.transform(X_data)
+        X_data = move_continuous(X_data, self.D_list, self.C_list)
+
+        print(f"---Starting Latent Training")
+
+        # Array to store the average losses over each epoch
+        losses = []
+
+        # Iterate over all of the data in each epoch
+        for epoch in range(epochs):
+
+            # Batch the data
+            batched_data = batch_data(X_data, self.batch_size)
+
+            # Array to store all the losses in the epoch
+            epoch_losses = []
+
+            # Iterate through all of the batches updating the netork for each batch
+            for batch in batched_data:
+
+                # Run the gradient step
+                supervised_loss_step = self.train_generator_sup_step(batch)
+
+                # Add the reconstruction loss to the epoch losses
+                epoch_losses.append(supervised_loss_step)
+
+            # Compute the average losses from this epoch and add it to the overall losses
+            epoch_loss = np.mean(epoch_losses)
+            losses.append(epoch_loss)
+
+            # Print the loss for this epoch
+            print(f'Epoch {epoch}: Supervised Loss = {epoch_loss}')
+
+        print(f"---Finished Latent Training")
+
+        losses = {
+            "reconstruction" : losses
+        }
+
+        return losses
+
 
     # Full training procedure for the generator and critic
     def fit_generative(self, X_data, epochs):
