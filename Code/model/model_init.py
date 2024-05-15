@@ -210,7 +210,7 @@ class PITGAN(Model):
                 X_hat_b = apply_gumbel_softmax(X_hat_logits, self.D_list, self.C_list, self.softmax_temp)
             else:
                 X_hat = apply_regular_softmax(X_hat_logits, self.D_list, self.C_list)
-                X_hat_b = X_hat_b[:, :total_discrete_dims]
+                X_hat_b = X_hat[:, :total_discrete_dims]
 
             Y_hat = self.encoder(X_hat_b)
             Y_hat = tf.nn.sigmoid(Y_hat)
@@ -275,8 +275,8 @@ class PITGAN(Model):
             if with_gumbel:
                 X_hat_b = apply_gumbel_softmax(X_hat_logits, self.D_list, self.C_list, self.softmax_temp)
             else:
-                X_hat_b = apply_regular_softmax(X_hat_logits, self.D_list, self.C_list)
-                X_hat_b = X_hat_b[:, :total_discrete_dims]
+                X_hat = apply_regular_softmax(X_hat_logits, self.D_list, self.C_list)
+                X_hat_b = X_hat[:, :total_discrete_dims]
 
             Y_hat = self.encoder(X_hat_b)
             Y_hat = tf.nn.sigmoid(Y_hat)
