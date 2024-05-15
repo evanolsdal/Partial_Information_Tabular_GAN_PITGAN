@@ -502,7 +502,7 @@ class PITGAN(Model):
                     epoch_gradient_penalty_losses.append(gradient_penalty_loss)
 
                 # Run the gradient step for the generator
-                unsupervised_generator_loss, supervised_loss = self.train_generator_step(batch, epoch, epochs)
+                unsupervised_generator_loss, supervised_loss = self.train_generator_unsup_step(batch, epoch, epochs)
 
                 # Add the losses to the epoch losses
                 epoch_unsupervised_generator_losses.append(unsupervised_generator_loss)
