@@ -240,7 +240,7 @@ class PITGAN(Model):
         return unsupervised_loss, supervised_loss
     
     # Gradient step for the generator under supervised learning. 
-    def train_generator_sup_step(self, X):
+    def train_generator_sup_step(self, X, with_gumbel):
 
         # Combine the trainable variables from the encoder and decoder so they can be kept track of in the tape
         trainable_variables = self.generator.trainable_variables
@@ -261,11 +261,13 @@ class PITGAN(Model):
             Z = tf.random.uniform((self.batch_size, self.R))
             X_hat_logits = self.generator([Z, Y], training=True)
 
-            # Compute the estimated latent space of this output. Note that we need to use gumbel softmax
-            # on the generator output to simulate discrete sampeling. We also apply regular sigmoid to the output of the 
-            # encoder for the latent variables, as this will make for a smoother optimization criteria with respect 
-            # to the generator parameters for the BCE loss later on
-            X_hat_b = apply_gumbel_softmax(X_hat_logits, self.D_list, self.C_list, self.softmax_temp)
+            # Compute the estimated latent space of this output
+            if with_gumbel:
+                X_hat_b = apply_gumbel_softmax(X_hat_logits, self.D_list, self.C_list, self.softmax_temp)
+            else:
+                X_hat_b = apply_regular_softmax(X_hat_logits, self.D_list, self.C_list)
+                X_hat_b = X_hat_b[:, :total_discrete_dims]
+
             Y_hat = self.encoder(X_hat_b)
             Y_hat = tf.nn.sigmoid(Y_hat)
             
@@ -400,7 +402,7 @@ class PITGAN(Model):
         return losses
     
     # Full traing procedure for the encoder decoder training
-    def fit_latent(self, X_data, epochs):
+    def fit_latent(self, X_data, with_gumbel, epochs):
 
         # Before training transform the data for proper use
         X_data = self.transformer.transform(X_data)
@@ -424,7 +426,7 @@ class PITGAN(Model):
             for batch in batched_data:
 
                 # Run the gradient step
-                supervised_loss_step = self.train_generator_sup_step(batch)
+                supervised_loss_step = self.train_generator_sup_step(batch, with_gumbel)
 
                 # Add the reconstruction loss to the epoch losses
                 epoch_losses.append(supervised_loss_step)
