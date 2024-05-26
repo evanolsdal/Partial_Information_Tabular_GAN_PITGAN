@@ -199,6 +199,8 @@ def evaluate(X_train, model, transformer, discrete_columns, utility_weights, key
     for keys in privacy['Num_Keys'].unique():
         results[keys + '_TCAP'] = privacy[privacy['Num_Keys']==keys]['TCAP'].mean()
         results[keys + '_TCAP_raw'] = privacy[privacy['Num_Keys']==keys]['TCAP_raw'].mean()
+        results[keys + '_TCAP_real'] = privacy[privacy['Num_Keys']==keys]['TCAP_real'].mean()
+        results[keys + '_TCAP_raw_real'] = privacy[privacy['Num_Keys']==keys]['TCAP_raw_real'].mean()
 
     results = [results]
 

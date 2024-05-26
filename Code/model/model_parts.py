@@ -58,7 +58,7 @@ def build_encoder(D_list, C_list, L, dim_e):
         x = layers.Dense(size, activation='relu', name=f'hidden_layer{i+1}')(x)
     
     # The final layer is linear to create logits that can later be used for the sigmoid activations
-    latent_output = layers.Dense(L, activation='linear', name='output_logits')(x)
+    latent_output = layers.Dense(L, activation='sigmoid', name='output_sigmoid')(x)
     
     # Define the encoder model
     encoder = Model(inputs=input_layer, outputs=latent_output, name="encoder")
@@ -85,6 +85,7 @@ def build_decoder(D_list, C_list, L, dim_r):
     x = latent_input
     for i, size in enumerate(dim_r):
         x = layers.Dense(size, activation='relu', name=f'hidden_layer_{i+1}')(x)
+        # x = layers.Dropout(dropout, name=f'dropout_layer_{i+1}')(x)
 
     # Prepare output layers for both categorical and continuous variables
     output_layers = []
@@ -121,17 +122,14 @@ def build_decoder(D_list, C_list, L, dim_r):
     - dim_g: List containing the dimensions for each hidden layer
 """
 
-def build_generator(R, L, D_list, C_list, dim_g, scale_noise):
+def build_generator(R, L, D_list, C_list, dim_g):
     
     # Inputs
     input_noise = layers.Input(shape=(R,), name = 'input_noise')
     input_latent = layers.Input(shape=(L,), name = 'input_latent')
 
-    # Scale the input noise
-    input_noise_scaled = layers.Lambda(lambda x: x*scale_noise, name='noise_scaled')(input_noise)
-
     # Combine to form one input
-    x = layers.Concatenate(name = 'input_concat')([input_noise_scaled, input_latent])
+    x = layers.Concatenate(name = 'input_concat')([input_noise, input_latent])
 
     total_discrete_dims = sum(D_list) + sum(C_list)
 
@@ -140,16 +138,24 @@ def build_generator(R, L, D_list, C_list, dim_g, scale_noise):
         x = layers.Concatenate(name = f'hidden_concat_{i+1}')([x, input_latent])
         x = layers.Dense(size, activation='relu', name=f'hidden_layer_{i+1}')(x)
 
-    # Outputs for categorical and continuous variables as logits from linear layer, to be processed later as 
-    # either soft or hard probabilites depending if the output is going to the critic (for unsupervised loss) 
-    # or the encoder (for supervised loss) respectively
-    discrete_output = layers.Dense(total_discrete_dims, activation='linear', name='output_logits')(x)
+    # Prepare output layers for both categorical and continuous variables
+    discrete_output = []
+
+    # Output for categorical variables using Dense layer with softmax activation
+    for i, d_i in enumerate(D_list):
+        cat_output = layers.Dense(d_i, activation='softmax', name=f'cat_output_{i+1}')(x)
+        discrete_output.append(cat_output)
+
+    # Output for continuous variables using Dense layer with softmax activation
+    for i, m_i in enumerate(C_list):
+        cat_output = layers.Dense(m_i, activation='softmax', name=f'mode_output_{i+1}')(x)
+        discrete_output.append(cat_output)
 
     # Output the continuous parts using tanh, add extra hidden layer for the continuous output
     continuous_output = layers.Dense(len(C_list), activation='tanh', name='output_continuous')(x)
 
     # Combine all outputs
-    output_layer = layers.Concatenate(name = 'output_concat')([discrete_output, continuous_output])
+    output_layer = layers.Concatenate(name = 'output_concat')([*discrete_output, continuous_output])
 
     # Define and return the generator model
     generator = Model(inputs=[input_noise, input_latent], outputs=output_layer, name="generator")
@@ -172,7 +178,7 @@ def build_generator(R, L, D_list, C_list, dim_g, scale_noise):
     - dim_d: List containing the dimensions for each hidden layer
     - L: Dimensionality of the latent space
 """
-def build_critic(D_list, C_list, dim_d, L, scale_discrete):
+def build_critic(D_list, C_list, dim_d, L):
     
     D = sum(D_list)
     C = sum(C_list)
@@ -185,7 +191,7 @@ def build_critic(D_list, C_list, dim_d, L, scale_discrete):
     input_raw = layers.Input(shape=(total_input_dim,), name='input_raw')
     
     # Extract the continuous and discrete inputs separately
-    input_continuous = layers.Lambda(lambda x: x[:, :total_discrete_dim],
+    input_continuous = layers.Lambda(lambda x: x[:, total_discrete_dim:],
                                     name='input_discrete_slice')(input_raw)
     
     # Additional input for the latent space P_l
@@ -199,8 +205,7 @@ def build_critic(D_list, C_list, dim_d, L, scale_discrete):
                                 output_shape=(d_i,),
                                 arguments = {'start': start_idx, 'end': start_idx + d_i},
                                 name=f'cat_slice_{i+1}')(input_raw)
-        cat_slice_scaled = layers.Lambda(lambda x: x*scale_discrete, name = f'cat_slice_scaled_{i+1}')(cat_slice)
-        cat_dense = layers.Dense(d_i-1, activation='relu', name=f'cat_embed_{i+1}')(cat_slice_scaled)
+        cat_dense = layers.Dense(d_i-1, activation='linear', name=f'cat_embed_{i+1}')(cat_slice)
         categorical_embeddings.append(cat_dense)
         start_idx += d_i
 
@@ -215,14 +220,13 @@ def build_critic(D_list, C_list, dim_d, L, scale_discrete):
                                     output_shape=(m_i,),
                                     arguments = {'start': start_idx, 'end': start_idx + m_i},
                                     name=f'mode_slice_{i+1}')(input_raw)
-        mode_slice_scaled = layers.Lambda(lambda x: x*scale_discrete, name = f'mode_slice_scaled_{i+1}')(mode_slice)
         # Get continuous variable slice
         continuous_slice = layers.Lambda(lambda x, start, end: x[:, start:end],
                                             output_shape=(1,),
                                             arguments = {'start': start_continuous_idx + i, 'end': start_continuous_idx + i+1},
                                             name=f'cont_slice_{i+1}')(input_raw)
-        combined_slice = layers.Concatenate(name=f'continuous_concat_{i+1}')([mode_slice_scaled, continuous_slice])
-        mode_dense = layers.Dense(m_i, activation='relu', name=f'mode_embed_{i+1}')(combined_slice)
+        combined_slice = layers.Concatenate(name=f'continuous_concat_{i+1}')([mode_slice, continuous_slice])
+        mode_dense = layers.Dense(m_i, activation='linear', name=f'mode_embed_{i+1}')(combined_slice)
         continuous_embeddings.append(mode_dense)
         start_idx += m_i
 

@@ -1,4 +1,5 @@
 import tensorflow as tf
+import numpy as np
 import math
 from tabulate import tabulate
 
@@ -136,6 +137,32 @@ def batch_data(x_train, batch_size):
 
     return batch
 
+# Batch data for both X and Y at the same time
+def batch_data_latent(X, Y, batch_size):
+
+    # Convert Y to same type as X
+    Y = tf.cast(Y, dtype=X.dtype)
+
+    # Combine X and Y along the second axis
+    combined_data = tf.concat([X, Y], axis=1)
+
+    # Create a TensorFlow dataset from the combined data
+    dataset = tf.data.Dataset.from_tensor_slices(combined_data)
+    dataset = dataset.shuffle(buffer_size=len(X))
+    dataset = dataset.batch(batch_size)
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)
+
+    # Function to split combined data back into X and Y
+    def split_data(batch):
+        x_batch = batch[:, :X.shape[1]]
+        y_batch = batch[:, X.shape[1]:]
+        return x_batch, y_batch
+
+    # Map the split function to the dataset
+    dataset = dataset.map(split_data)
+
+    return dataset
+
 
 # Noise generate noise proportially for the number of discrete and continuous variables
 def get_custom_noise(D_list, C_list, batch):
@@ -148,6 +175,7 @@ def get_custom_noise(D_list, C_list, batch):
 
     return noise
 
+# Function to somewhat understand what latent dimensions would be appropriate for training the model
 def get_latent_dims(D_list, C_list):
     # Calculate the product of dimensions
     total_arrangements = math.prod(D_list + C_list)

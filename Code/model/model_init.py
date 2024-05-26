@@ -5,7 +5,7 @@ from tensorflow.keras.losses import CategoricalCrossentropy, BinaryCrossentropy
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.optimizers.schedules import ExponentialDecay
 from .model_parts import build_encoder, build_decoder, build_generator, build_critic
-from .model_helpers import apply_regular_softmax, apply_gumbel_softmax, gumbel_sigmoid, batch_data
+from .model_helpers import apply_regular_softmax, apply_gumbel_softmax, gumbel_sigmoid, batch_data, batch_data_latent
 from data_processing.data_transformer import DataTransformer, move_continuous, reverte_continuous
 
 """
@@ -52,8 +52,6 @@ class PITGAN(Model):
         # Get the relevant arguments
         D_list, C_list = transformer.get_relevant_dimensions()
         R = parameters.get('R')
-        scale_noise = parameters.get('scale_noise')
-        scale_discrete = parameters.get('scale_discrete')
 
         dim_e = hidden_dimensions.get('dim_e')
         dim_r = hidden_dimensions.get('dim_r')
@@ -66,28 +64,16 @@ class PITGAN(Model):
         self.R = R
         self.L = L
 
-        self.alpha_sup = parameters.get('alpha_sup')
+        # self.alpha_sup = parameters.get('alpha_sup')
         self.alpha_grad = parameters.get('alpha_grad')
+        self.alpha_sigma = parameters.get('alpha_sigma')
         self.critic_steps = parameters.get('critic_steps')
         self.batch_size = parameters.get('batch_size')
-        self.sigmoid_temp  = parameters.get('sigmoid_temp')
-        self.softmax_temp = parameters.get('softmax_temp')
-        self.scale_continuous = parameters.get('scale_continuous')
-        self.scale_noise = scale_noise
-        self.scale_discrete = scale_discrete
+        # self.latent_sharpness = parameters.get('latent_sharpness')
+        # decoder_dropout = parameters.get('decoder_dropout')
+        
 
         self.transformer = transformer
-
-        """# Define the learning schedule for the gradient learing rate
-        decay_rate = parameters.get('decay_rate')
-        decay_steps = parameters.get('decay_steps')
-        generator_lr = parameters.get('grad_step_generator')
-
-        lr = ExponentialDecay(initial_learning_rate = generator_lr, 
-                              decay_steps = decay_steps,
-                              decay_rate = decay_rate,
-                              staircase = True)"""
-        
 
         # Initialize the optimizers for the different gradient steps
         self.autoencoder_optimizer = Adam(learning_rate=parameters.get('grad_step_autoencoding'))
@@ -101,8 +87,8 @@ class PITGAN(Model):
         # Build the network parts
         self.encoder = build_encoder(D_list, C_list, L, dim_e)
         self.decoder = build_decoder(D_list, C_list, L, dim_r)
-        self.generator = build_generator(R, L, D_list, C_list, dim_g, scale_noise)
-        self.critic = build_critic(D_list, C_list, dim_c, L, scale_discrete)
+        self.generator = build_generator(R, L, D_list, C_list, dim_g)
+        self.critic = build_critic(D_list, C_list, dim_c, L)
 
     # Compiles the model before taining the model
     def compile(self, *args, **kwargs):
@@ -129,11 +115,7 @@ class PITGAN(Model):
     """
 
     # Gradient step for the latent autoencoder
-    def train_autoencoder_step(self, X, with_gumbel):
-
-        # Get only the discrete features of X
-        total_discrete_dims = sum(self.D_list) + sum(self.C_list)
-        X = X[:, :total_discrete_dims]
+    def train_autoencoder_step(self, X):
 
         # Combine the trainable variables from the encoder and decoder so they can be kept track of in the tape
         trainable_variables = self.encoder.trainable_variables + self.decoder.trainable_variables
@@ -142,13 +124,7 @@ class PITGAN(Model):
 
             # Compute the latent encoding and the recovered encoding. Note that we use gumbel sigmoid in this step
             # to make the latent output "discrete" during training
-            Y_hat_logits = self.encoder(X, training = True)
-
-            if with_gumbel:
-                Y_hat = gumbel_sigmoid(Y_hat_logits, self.sigmoid_temp)
-            else:
-                Y_hat = tf.nn.sigmoid(Y_hat_logits)
-
+            Y_hat = self.encoder(X, training = True)
             X_hat = self.decoder(Y_hat, training = True)
 
             # Then compute the Categorical Cross Entropy between the real data and the decoder output for each
@@ -171,115 +147,48 @@ class PITGAN(Model):
 
         # return the reconstruction loss
         return reconstruction_loss
-
-    # Gradient step for the generator. Note throughout that we try to make the optimization criteria for the generator
-    # as differentiable as possible to help mitigate the complexity of the gradient computations in this step.
-    def train_generator_unsup_step(self, X, with_gumbel):
-
-        # Get the number of continuous variables, and scale the last c rows of X
-        c = len(self.C_list)
-        X_unscaled = X[:, :-c]
-        X_scaled = X[:, -c:] * self.scale_continuous
-        X = tf.concat([X_unscaled, X_scaled], axis=-1)
+    
+    # Gradient step for pushing encoder output to the ends
+    def train_encoder_step(self, X, Y):
 
         # Combine the trainable variables from the encoder and decoder so they can be kept track of in the tape
-        trainable_variables = self.generator.trainable_variables
+        trainable_variables = self.encoder.trainable_variables
 
         with tf.GradientTape() as tape:
 
-            # Get only the discrete features of X
-            total_discrete_dims = sum(self.D_list) + sum(self.C_list)
-            X_b = X[:, :total_discrete_dims]
+            # Compute the latent encoding and the recovered encoding. Note that we use gumbel sigmoid in this step
+            # to make the latent output "discrete" during training
+            Y_hat = self.encoder(X, training = True)
 
-            # Get the latent variables from the encoder from the real samples. Note that we pass the output through the 
-            # regular sigmoid activation and make it discrete as we are now drawing actual samples from this latent space
-            Y_logits = self.encoder(X_b)
-            Y = tf.nn.sigmoid(Y_logits)
-            Y = tf.cast(tf.greater(Y, 0.5), Y.dtype)
-
-            # Use these as inputs to the generator, as well as some sampeled noise, 
-            Z = tf.random.uniform((self.batch_size, self.R))
-            X_hat_logits = self.generator([Z, Y], training=True)
-
-            # Compute the estimated latent space of this output. Note that we need to use gumbel softmax
-            # on the generator output to simulate discrete sampeling. We also apply regular sigmoid to the output of the 
-            # encoder for the latent variables, as this will make for a smoother optimization criteria with respect 
-            # to the generator parameters for the BCE loss later on
-            # Compute the estimated latent space of this output
-            if with_gumbel:
-                X_hat_b = apply_gumbel_softmax(X_hat_logits, self.D_list, self.C_list, self.softmax_temp)
-            else:
-                X_hat = apply_regular_softmax(X_hat_logits, self.D_list, self.C_list)
-                X_hat_b = X_hat[:, :total_discrete_dims]
-
-            Y_hat = self.encoder(X_hat_b)
-            Y_hat = tf.nn.sigmoid(Y_hat)
-
-            # Pass the latent conditioning and the generator output to the critic for the wasserstein losses. Note
-            # that we first need to pass the generator output through a regular softmax. We choose regular softmax
-            # of gumbel softmax since this will create smoother probability outputs for the wasserstain approximation.
-            # We also scale the continuous part of the representation by the specified amount
-            X_hat = apply_regular_softmax(X_hat_logits, self.D_list, self.C_list)
-            X_hat_unscaled = X_hat[:, :-c]
-            X_hat_scaled = X_hat[:, -c:] * self.scale_continuous
-            X_hat = tf.concat([X_hat_unscaled, X_hat_scaled], axis=-1)
-
-            W = self.critic([X_hat, Y])
-
-            # Compute the Binary Cross Entropy between the generators latent output and the latent output it was 
-            # conditioned on
-            supervised_loss = self.BCE(Y, Y_hat)
-
-            # Compute the expectation of the critic output to get the portion of the wasserstein loss the
-            # generator needs to maximize 
-            unsupervised_loss = tf.reduce_mean(W)
-
-            # Combine the loss functions into one loss using the weight hyper parameter to balance the two losses,
-            # where we decrease the the influence of the supervised loss as training progresses
-            # (note that unsupervised loss is negated in order to maximize it when performing gradient descent)
-            # alpha_sup = self.alpha_sup - ((epoch+1)/epochs)*self.alpha_sup
-            alpha_sup = self.alpha_sup
-
-            generator_loss = -unsupervised_loss + alpha_sup*supervised_loss
+            discrete_score = self.BCE(Y, Y_hat)
 
         # Compute the gradients an update the weights
-        grads = tape.gradient(generator_loss, trainable_variables)
-        self.generator_optimizer.apply_gradients(zip(grads, trainable_variables))
+        grads = tape.gradient(discrete_score, trainable_variables)
+        self.autoencoder_optimizer.apply_gradients(zip(grads, trainable_variables))
 
-        # Return the two losses separately
-        return unsupervised_loss, supervised_loss
-    
+        # return the reconstruction loss
+        return discrete_score
+
+ 
     # Gradient step for the generator under supervised learning. 
-    def train_generator_sup_step(self, X, with_gumbel):
+    def train_generator_sup_step(self, Y):
+
+        # Size of the batch
+        batch_size = Y.shape[0]
 
         # Combine the trainable variables from the encoder and decoder so they can be kept track of in the tape
         trainable_variables = self.generator.trainable_variables
 
         with tf.GradientTape() as tape:
 
-            # Get only the discrete features of X
+            # Generate a batch based on the latent values
+            Z = tf.random.uniform((batch_size, self.R))
+            X_hat = self.generator([Z, Y], training=True)
+
+            # Get the latent values of the generator output
             total_discrete_dims = sum(self.D_list) + sum(self.C_list)
-            X_b = X[:, :total_discrete_dims]
-
-            # Get the latent variables from the encoder from the real samples. Note that we pass the output through the 
-            # regular sigmoid activation and make it discrete as we are now drawing actual samples from this latent space
-            Y_logits = self.encoder(X_b)
-            Y = tf.nn.sigmoid(Y_logits)
-            Y = tf.cast(tf.greater(Y, 0.5), Y.dtype)
-
-            # Use these as inputs to the generator, as well as some sampeled noise, 
-            Z = tf.random.uniform((self.batch_size, self.R))
-            X_hat_logits = self.generator([Z, Y], training=True)
-
-            # Compute the estimated latent space of this output
-            if with_gumbel:
-                X_hat_b = apply_gumbel_softmax(X_hat_logits, self.D_list, self.C_list, self.softmax_temp)
-            else:
-                X_hat = apply_regular_softmax(X_hat_logits, self.D_list, self.C_list)
-                X_hat_b = X_hat[:, :total_discrete_dims]
-
+            X_hat_b = X_hat[:, :total_discrete_dims]
             Y_hat = self.encoder(X_hat_b)
-            Y_hat = tf.nn.sigmoid(Y_hat)
             
             # Compute the Binary Cross Entropy between the generators latent output and the latent output it was 
             # conditioned on
@@ -291,40 +200,71 @@ class PITGAN(Model):
 
         # Return the two losses separately
         return supervised_loss
+    
+    
+    # Gradient step for the generator. Note throughout that we try to make the optimization criteria for the generator
+    # as differentiable as possible to help mitigate the complexity of the gradient computations in this step.
+    def train_generator_unsup_step(self, Y):
+
+        # Size of the batch
+        batch_size = Y.shape[0]
+
+        # Combine the trainable variables from the encoder and decoder so they can be kept track of in the tape
+        trainable_variables = self.generator.trainable_variables
+
+        with tf.GradientTape() as tape:
+
+            # Generate a sample based on this latent dimension
+            Z = tf.random.uniform((batch_size, self.R))
+            X_hat = self.generator([Z, Y], training=True)
+
+            """
+            # Get the latent values of the generated samples
+            total_discrete_dims = sum(self.D_list) + sum(self.C_list)
+            X_hat_b = X_hat[:, :total_discrete_dims]
+            X_hat_b = tf.sigmoid(self.latent_sharpness*(X_hat_b-0.5))
+            Y_hat = self.encoder(X_hat_b)
+
+            # Apply some additional shapening to the latent estimate to mimic discrete mapping
+            Y_hat = tf.sigmoid(self.latent_sharpness*(Y_hat-0.5))
+
+            # Compute the Binary Cross Entropy between the generators latent output and the latent output it was 
+            # conditioned on
+            supervised_loss = self.BCE(Y, Y_hat)
+            """
+
+            # Let the critic evaluate the generated data for this latent dimension
+            W = self.critic([X_hat, Y])
+
+            # Compute the expectation of the critic output to get the portion of the wasserstein loss the
+            # generator needs to maximize 
+            unsupervised_loss = tf.reduce_mean(W)
+
+            # Combine the loss functions into one loss using the weight hyper parameter to balance the two losses
+            generator_loss = -unsupervised_loss
+
+        # Compute the gradients an update the weights
+        grads = tape.gradient(generator_loss, trainable_variables)
+        self.generator_optimizer.apply_gradients(zip(grads, trainable_variables))
+
+        # Return the two losses separately
+        return unsupervised_loss
 
 
     # Gradient step for the critic
-    def train_critic_step(self, X):
+    def train_critic_step(self, X, Y):
 
-        # Get the number of continuous variables, and scale the last c rows of X
-        c = len(self.C_list)
-        X_unscaled = X[:, :-c]
-        X_scaled = X[:, -c:] * self.scale_continuous
-        X = tf.concat([X_unscaled, X_scaled], axis=-1)
+        # Size of the batch
+        batch_size = X.shape[0]
 
         # Combine the trainable variables from the encoder and decoder so they can be kept track of in the tape
         trainable_variables = self.critic.trainable_variables
 
         with tf.GradientTape() as tape:
 
-            # Get only the discrete features of X
-            total_discrete_dims = sum(self.D_list) + sum(self.C_list)
-            X_b = X[:, :total_discrete_dims]
-
-            # Get the latent variables from the encoder from the real samples. Note that we pass the output through the 
-            # regular sigmoid activation and make it discrete as we are now drawing actual samples from this latent space
-            Y_logits = self.encoder(X_b)
-            Y = tf.nn.sigmoid(Y_logits)
-            Y = tf.cast(tf.greater(Y, 0.5), Y.dtype)
-
-            # Use these as inputs to the generator, as well as some sampeled noise, where we apply regular softmax to the
-            # output of the generator to get the continuous range of probabilities
-            Z = tf.random.uniform((self.batch_size, self.R))
-            X_hat_logits = self.generator([Z, Y])
-            X_hat = apply_regular_softmax(X_hat_logits, self.D_list, self.C_list)
-            X_hat_unscaled = X_hat[:, :-c]
-            X_hat_scaled = X_hat[:, -c:] * self.scale_continuous
-            X_hat = tf.concat([X_hat_unscaled, X_hat_scaled], axis=-1)
+            # Use latent values to generate synthetic data
+            Z = tf.random.uniform((batch_size, self.R))
+            X_hat = self.generator([Z, Y])
 
             # Pass the real and generated output to the critic for the wasserstein losses, conditioning both on the 
             # given latent space
@@ -334,7 +274,7 @@ class PITGAN(Model):
             # Next we need to get the gradients of the critic with respect to its input, and get its norm
 
             # sample uniform noise to combine the outputs and mix the samples
-            epsilon = tf.random.uniform([self.batch_size, 1])
+            epsilon = tf.random.uniform([batch_size, 1])
             X_mixed = epsilon * tf.dtypes.cast(X, tf.float32) + (1 - epsilon) * X_hat
 
             # compute the gradients of the critic with respect to the input data
@@ -367,16 +307,20 @@ class PITGAN(Model):
     """
 
     # Full traing procedure for the encoder decoder training
-    def fit_autoencoder(self, X_data, with_gumbel, epochs):
+    def fit_autoencoder(self, X_data, epochs):
 
         # Before training transform the data for proper use
         X_data = self.transformer.transform(X_data)
         X_data = move_continuous(X_data, self.D_list, self.C_list)
 
+        # Get only the discrete features of X
+        total_discrete_dims = sum(self.D_list) + sum(self.C_list)
+        X_data = X_data[:, :total_discrete_dims]
+
         print(f"---Starting Autoencoder Training")
 
         # Array to store the average losses over each epoch
-        losses = []
+        reconstruction_losses = []
 
         # Iterate over all of the data in each epoch
         for epoch in range(epochs):
@@ -385,40 +329,101 @@ class PITGAN(Model):
             batched_data = batch_data(X_data, self.batch_size)
 
             # Array to store all the losses in the epoch
-            epoch_losses = []
+            epoch_reconstruction_losses = []
 
             # Iterate through all of the batches updating the netork for each batch
             for batch in batched_data:
 
                 # Run the gradient step
-                reconstruction_loss_step = self.train_autoencoder_step(batch, with_gumbel)
+                reconstruction_loss_step = self.train_autoencoder_step(batch)
 
                 # Add the reconstruction loss to the epoch losses
-                epoch_losses.append(reconstruction_loss_step)
+                epoch_reconstruction_losses.append(reconstruction_loss_step)
 
             # Compute the average losses from this epoch and add it to the overall losses
-            epoch_loss = np.mean(epoch_losses)
-            losses.append(epoch_loss)
+            epoch_reconstruction_loss = np.mean(epoch_reconstruction_losses)
+            reconstruction_losses.append(epoch_reconstruction_loss)
 
             # Print the loss for this epoch
-            print(f'Epoch {epoch}: Reconstruction Loss = {epoch_loss}')
+            print(f'Epoch {epoch}: Reconstruction Loss = {epoch_reconstruction_loss}')
 
         print(f"---Finished Autoencoder Training")
 
         losses = {
-            "reconstruction" : losses
+            "reconstruction" : reconstruction_losses
         }
 
         return losses
     
     # Full traing procedure for the encoder decoder training
-    def fit_latent(self, X_data, with_gumbel, epochs):
+    def fit_encoder(self, X_data, epochs):
 
         # Before training transform the data for proper use
         X_data = self.transformer.transform(X_data)
         X_data = move_continuous(X_data, self.D_list, self.C_list)
 
-        print(f"---Starting Latent Training")
+        # Get the latent encoding for the data
+        total_discrete = sum(self.D_list) + sum(self.C_list)
+        X_data = X_data[:, :total_discrete]
+
+        Y = self.encoder(X_data)
+        Y = tf.cast(tf.greater(Y, 0.5), Y.dtype)
+
+        print(f"---Starting Encoder Training")
+
+        # Array to store the average losses over each epoch
+        discrete_losses = []
+
+        # Iterate over all of the data in each epoch
+        for epoch in range(epochs):
+
+            # Batch the data
+            batched_data = batch_data_latent(X_data, Y, self.batch_size)
+
+            # Array to store all the losses in the epoch
+            epoch_discrete_losses = []
+
+            # Iterate through all of the batches updating the netork for each batch
+            for X_batch, Y_batch in batched_data:
+
+                # Run the gradient step
+                discrete_loss_step = self.train_encoder_step(X_batch, Y_batch)
+
+                # Add the reconstruction loss to the epoch losses
+                epoch_discrete_losses.append(discrete_loss_step)
+
+            # Compute the average losses from this epoch and add it to the overall losses
+            epoch_discrete_loss = np.mean(epoch_discrete_losses)
+            discrete_losses.append(epoch_discrete_loss)
+
+            # Print the loss for this epoch
+            print(f'Epoch {epoch}: Encoder Loss = {epoch_discrete_loss}')
+
+        print(f"---Finished Encoder Training")
+
+        losses = {
+            "discrete_score" : discrete_losses
+        }
+
+        return losses
+    
+    # Full traing procedure for the encoder decoder training
+    def fit_supervised(self, X_data, epochs):
+
+        # Before training transform the data for proper use
+        X_data = self.transformer.transform(X_data)
+        X_data = move_continuous(X_data, self.D_list, self.C_list)
+
+        # Get the latent encoding for the data
+        total_discrete = sum(self.D_list) + sum(self.C_list)
+        X_data = X_data[:, :total_discrete]
+
+        Y = self.encoder(X_data)
+        Y = tf.cast(tf.greater(Y, 0.5), Y.dtype)
+        Y = tf.cast(Y, dtype=X_data.dtype)
+
+
+        print(f"---Starting Supervised Training")
 
         # Array to store the average losses over each epoch
         losses = []
@@ -427,16 +432,16 @@ class PITGAN(Model):
         for epoch in range(epochs):
 
             # Batch the data
-            batched_data = batch_data(X_data, self.batch_size)
+            batched_data = batch_data(Y, self.batch_size)
 
             # Array to store all the losses in the epoch
             epoch_losses = []
 
             # Iterate through all of the batches updating the netork for each batch
-            for batch in batched_data:
+            for Y_batch in batched_data:
 
                 # Run the gradient step
-                supervised_loss_step = self.train_generator_sup_step(batch, with_gumbel)
+                supervised_loss_step = self.train_generator_sup_step(Y_batch)
 
                 # Add the reconstruction loss to the epoch losses
                 epoch_losses.append(supervised_loss_step)
@@ -448,23 +453,32 @@ class PITGAN(Model):
             # Print the loss for this epoch
             print(f'Epoch {epoch}: Supervised Loss = {epoch_loss}')
 
-        print(f"---Finished Latent Training")
+        print(f"---Finished Supervised Training")
 
         losses = {
-            "reconstruction" : losses
+            "supervised" : losses
         }
 
         return losses
 
 
     # Full training procedure for the generator and critic
-    def fit_generative(self, X_data, with_gumbel, epochs):
+    def fit_unsupervised(self, X_data, epochs):
 
         # Before training transform the data for proper use
         X_data = self.transformer.transform(X_data)
         X_data = move_continuous(X_data, self.D_list, self.C_list)
 
-        print(f"---Starting Generative Training")
+        # Get the latent encoding for the data
+        num_samples = X_data.shape[0]
+        total_discrete = sum(self.D_list) + sum(self.C_list)
+        X_data_b = X_data[:, :total_discrete]
+
+        Y = self.encoder(X_data_b)
+        Y = tf.cast(tf.greater(Y, 0.5), Y.dtype)
+        Y = tf.cast(Y, dtype=X_data.dtype)
+
+        print(f"---Starting Unsupervised Training")
 
         # Array to store the average losses for all losses over each epoch
         unsupervised_generator_losses = []
@@ -476,14 +490,14 @@ class PITGAN(Model):
         for epoch in range(epochs):
 
             # Get the batches for both the generator and the critic
-            generator_batches = iter(batch_data(X_data, self.batch_size))
-            critic_iterator = iter(batch_data(X_data, self.batch_size))
+            generator_batches = iter(batch_data(Y, self.batch_size))
+            critic_iterator = iter(batch_data_latent(X_data, Y, self.batch_size))
 
             # Array to store all the losses in the epoch
             epoch_unsupervised_critic_losses = []
             epoch_gradient_penalty_losses = []
             epoch_unsupervised_generator_losses = []
-            epoch_supervised_losses = []
+            #epoch_supervised_losses = []
 
             # We iterate through all of the batches, where these batches are used only for the generator.
             # A separete iterator over the batches are then used to update the critic critic_steps number of 
@@ -503,41 +517,53 @@ class PITGAN(Model):
 
                     except StopIteration:
                         # Update the batches and draw sample
-                        critic_iterator = iter(batch_data(X_data, self.batch_size))
+                        critic_iterator = iter(batch_data_latent(X_data, Y, self.batch_size))
                         critic_batch = next(critic_iterator)
 
+                    X_batch = critic_batch[0]
+                    Y_batch = critic_batch[1]
+
                     # Run gradient step for the critic based on the new batch
-                    unsupervised_critic_loss, gradient_penalty_loss = self.train_critic_step(critic_batch)
+                    unsupervised_critic_loss, gradient_penalty_loss = self.train_critic_step(X_batch, Y_batch)
 
                     # Add the losses to the epoch losses
                     epoch_unsupervised_critic_losses.append(unsupervised_critic_loss)
                     epoch_gradient_penalty_losses.append(gradient_penalty_loss)
 
                 # Run the gradient step for the generator
-                unsupervised_generator_loss, supervised_loss = self.train_generator_unsup_step(batch, with_gumbel)
+                unsupervised_generator_loss = self.train_generator_unsup_step(batch)
 
                 # Add the losses to the epoch losses
                 epoch_unsupervised_generator_losses.append(unsupervised_generator_loss)
-                epoch_supervised_losses.append(supervised_loss)
 
             # Compute the average losses from this epoch and add it to the overall losses
             epoch_unsupervised_generator_loss = np.mean(epoch_unsupervised_generator_losses)
             epoch_unsupervised_critic_loss = np.mean(epoch_unsupervised_critic_losses)
             epoch_gradient_penalty_loss = np.mean(epoch_gradient_penalty_losses)
-            epoch_supervised_loss = np.mean(epoch_supervised_losses)
+            # epoch_supervised_loss = np.mean(epoch_supervised_losses)
 
+            # Compute an epoch supervised loss estimate
+            Z = tf.random.uniform((num_samples, self.R))
+            X_hat= self.generator([Z, Y])
+            X_hat_b = X_hat[:, :total_discrete]
+            X_hat_b = tf.cast(tf.greater(X_hat_b, 0.5), X_hat_b.dtype)
+            Y_hat = self.encoder(X_hat_b)
+            Y_hat = tf.cast(tf.greater(Y_hat, 0.5), Y.dtype)
+            supervised_loss = tf.reduce_mean(tf.abs(Y-Y_hat))
+
+            # Append losses
             unsupervised_generator_losses.append(epoch_unsupervised_generator_loss)
             unsupervised_critic_losses.append(epoch_unsupervised_critic_loss)
             gradient_penalty_losses.append(epoch_gradient_penalty_loss)
-            supervised_losses.append(epoch_supervised_loss)
+            supervised_losses.append(supervised_loss)
 
             # Print the losses for this epoch
-            print(f'Epoch {epoch}: Supervised Loss = {epoch_supervised_loss} '
+            print(f'Epoch {epoch}: Supervised Loss = {supervised_loss} '
                     f'Unsupervised Loss G = {epoch_unsupervised_generator_loss} '
                     f'Unsupervised Loss C = {epoch_unsupervised_critic_loss} '
                     f'Gradient Penalty = {epoch_gradient_penalty_loss}')
 
-        print(f"---Finished Generative Training")
+        print(f"---Finished Unsupervised Training")
 
         # Create the dict to hold the loss outputs
 
@@ -557,7 +583,7 @@ class PITGAN(Model):
         auto_losses = self.fit_autoencoder(X_data, auto_epochs)
 
         # train the generator
-        generator_losses = self.fit_generative(X_data, gen_epochs)
+        generator_losses = self.fit_unsupervised(X_data, gen_epochs)
 
         return auto_losses, generator_losses
     
@@ -569,6 +595,10 @@ class PITGAN(Model):
     # Function to inference from the latent space
     def get_latent(self, X, probs):
 
+        # Before training transform the data for proper use
+        X = self.transformer.transform(X)
+        X = move_continuous(X, self.D_list, self.C_list)
+
         # subset the discrete values
         total_discrete_dims = sum(self.D_list) + sum(self.C_list)
         X = X[:, :total_discrete_dims]
@@ -577,11 +607,9 @@ class PITGAN(Model):
         X = tf.convert_to_tensor(X, dtype=tf.float32)
 
         # get the encoders sigmoid output
-        Y_logits = self.encoder(X)
+        Y = self.encoder(X)
 
-        Y = tf.nn.sigmoid(Y_logits)
-
-        if probs:
+        if not probs:
             Y = tf.cast(tf.greater(Y, 0.5), Y.dtype)
 
         return Y
@@ -589,12 +617,8 @@ class PITGAN(Model):
     # Function to inference from the encoder decoder
     def get_decoded(self, X):
 
-        # Before training transform the data for proper use
-        X = self.transformer.transform(X)
-        X = move_continuous(X, self.D_list, self.C_list)
-
         # Get the latent codes with compute enabled
-        Y = self.get_latent(X, True)
+        Y = self.get_latent(X, False)
 
         # Get logits for the latent encoding and apply regular softmax
         X_hat = self.decoder(Y)
@@ -604,18 +628,7 @@ class PITGAN(Model):
         argmax_samples = []
         
         # Argmax on the categorical variables
-        for dim in self.D_list:
-            # select group of one hots probabilities
-            slice = X_hat[:, start_idx:start_idx + dim]
-            # apply hard argmax to probabilities to get discrete one hots
-            sampled_group = tf.cast(tf.equal(slice, tf.reduce_max(slice, axis=-1, keepdims=True)), dtype=tf.float32)
-            # append one hots to list
-            argmax_samples.append(sampled_group)
-            # update start index for next group
-            start_idx += dim
-
-        # Argmax on the mode variables
-        for dim in self.C_list:
+        for dim in self.D_list + self.C_list:
             # select group of one hots probabilities
             slice = X_hat[:, start_idx:start_idx + dim]
             # apply hard argmax to probabilities to get discrete one hots
@@ -639,12 +652,8 @@ class PITGAN(Model):
     # Specify k to determine the number of samples to draw from each point of data.
     def generate(self, X, k):
 
-        # Before training transform the data for proper use
-        X = self.transformer.transform(X)
-        X = move_continuous(X, self.D_list, self.C_list)
-
         # Get the latent codes with compute enabled
-        Y = self.get_latent(X, True)
+        Y = self.get_latent(X, False)
 
         # place to store output
         output_batches = []
@@ -654,11 +663,9 @@ class PITGAN(Model):
 
         # generate for each batch
         for i in range(k):
-
             # get the generated output
             Z = tf.random.uniform((num_samples, self.R))
-            X_tilde_logits = self.generator([Z, Y])
-            X_tilde = apply_regular_softmax(X_tilde_logits, self.D_list, self.C_list)
+            X_tilde = self.generator([Z, Y])
 
             output_batches.append(X_tilde)
 
@@ -670,18 +677,7 @@ class PITGAN(Model):
         argmax_samples = []
         
         # Argmax on the categorical variables
-        for dim in self.D_list:
-            # select group of one hots probabilities
-            slice = X_hat[:, start_idx:start_idx + dim]
-            # apply hard argmax to probabilities to get discrete one hots
-            sampled_group = tf.cast(tf.equal(slice, tf.reduce_max(slice, axis=-1, keepdims=True)), dtype=tf.float32)
-            # append one hots to list
-            argmax_samples.append(sampled_group)
-            # update start index for next group
-            start_idx += dim
-
-        # Argmax on the mode variables
-        for dim in self.C_list:
+        for dim in self.D_list + self.C_list:
             # select group of one hots probabilities
             slice = X_hat[:, start_idx:start_idx + dim]
             # apply hard argmax to probabilities to get discrete one hots
@@ -692,12 +688,12 @@ class PITGAN(Model):
             start_idx += dim
 
         # concat the one hots
-        X_hat_output = tf.concat(argmax_samples, axis=-1) 
+        X_hat_one_hots = tf.concat(argmax_samples, axis=-1) 
 
         # get the continuous parts of the generator output and concatenate them to final output
         X_hat_continuous = X_hat[:, start_idx:]
 
-        X_hat_output = tf.concat([X_hat_output, X_hat_continuous], axis=-1)
+        X_hat_output = tf.concat([X_hat_one_hots, X_hat_continuous], axis=-1)
 
         X_hat_output = X_hat_output.numpy()
 

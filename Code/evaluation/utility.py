@@ -224,7 +224,7 @@ def compute_pMSE(data_original_input, data_synthetic_input, discrete_columns):
     model.fit(X, y)
 
     # Predict the propensity scores on the test set
-    p_hat = model.predict_proba(X)[:, 1]  # Probability that the sample is synthetic
+    p_hat = model.predict_proba(X)[:, 1] 
 
     # Compute pMSE
     pMSE = np.mean((p_hat - c)**2)
