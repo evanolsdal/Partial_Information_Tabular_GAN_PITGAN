@@ -64,12 +64,11 @@ class PITGAN(Model):
         self.R = R
         self.L = L
 
-        # self.alpha_sup = parameters.get('alpha_sup')
+        self.alpha_sup = parameters.get('alpha_sup')
         self.alpha_grad = parameters.get('alpha_grad')
-        self.alpha_sigma = parameters.get('alpha_sigma')
         self.critic_steps = parameters.get('critic_steps')
         self.batch_size = parameters.get('batch_size')
-        # self.latent_sharpness = parameters.get('latent_sharpness')
+        self.latent_sharpness = parameters.get('latent_sharpness')
         # decoder_dropout = parameters.get('decoder_dropout')
         
 
@@ -218,11 +217,10 @@ class PITGAN(Model):
             Z = tf.random.uniform((batch_size, self.R))
             X_hat = self.generator([Z, Y], training=True)
 
-            """
             # Get the latent values of the generated samples
             total_discrete_dims = sum(self.D_list) + sum(self.C_list)
             X_hat_b = X_hat[:, :total_discrete_dims]
-            X_hat_b = tf.sigmoid(self.latent_sharpness*(X_hat_b-0.5))
+            # X_hat_b = tf.sigmoid(self.latent_sharpness*(X_hat_b-0.5))
             Y_hat = self.encoder(X_hat_b)
 
             # Apply some additional shapening to the latent estimate to mimic discrete mapping
@@ -231,8 +229,7 @@ class PITGAN(Model):
             # Compute the Binary Cross Entropy between the generators latent output and the latent output it was 
             # conditioned on
             supervised_loss = self.BCE(Y, Y_hat)
-            """
-
+            
             # Let the critic evaluate the generated data for this latent dimension
             W = self.critic([X_hat, Y])
 
@@ -241,14 +238,14 @@ class PITGAN(Model):
             unsupervised_loss = tf.reduce_mean(W)
 
             # Combine the loss functions into one loss using the weight hyper parameter to balance the two losses
-            generator_loss = -unsupervised_loss
+            generator_loss = -unsupervised_loss + self.alpha_sup*supervised_loss
 
         # Compute the gradients an update the weights
         grads = tape.gradient(generator_loss, trainable_variables)
         self.generator_optimizer.apply_gradients(zip(grads, trainable_variables))
 
         # Return the two losses separately
-        return unsupervised_loss
+        return unsupervised_loss, supervised_loss
 
 
     # Gradient step for the critic
@@ -497,7 +494,7 @@ class PITGAN(Model):
             epoch_unsupervised_critic_losses = []
             epoch_gradient_penalty_losses = []
             epoch_unsupervised_generator_losses = []
-            #epoch_supervised_losses = []
+            epoch_supervised_losses = []
 
             # We iterate through all of the batches, where these batches are used only for the generator.
             # A separete iterator over the batches are then used to update the critic critic_steps number of 
@@ -531,34 +528,35 @@ class PITGAN(Model):
                     epoch_gradient_penalty_losses.append(gradient_penalty_loss)
 
                 # Run the gradient step for the generator
-                unsupervised_generator_loss = self.train_generator_unsup_step(batch)
+                unsupervised_loss, supervised_loss = self.train_generator_unsup_step(batch)
 
                 # Add the losses to the epoch losses
-                epoch_unsupervised_generator_losses.append(unsupervised_generator_loss)
+                epoch_unsupervised_generator_losses.append(unsupervised_loss)
+                epoch_supervised_losses.append(supervised_loss)
 
             # Compute the average losses from this epoch and add it to the overall losses
             epoch_unsupervised_generator_loss = np.mean(epoch_unsupervised_generator_losses)
             epoch_unsupervised_critic_loss = np.mean(epoch_unsupervised_critic_losses)
             epoch_gradient_penalty_loss = np.mean(epoch_gradient_penalty_losses)
-            # epoch_supervised_loss = np.mean(epoch_supervised_losses)
+            epoch_supervised_loss = np.mean(epoch_supervised_losses)
 
-            # Compute an epoch supervised loss estimate
+            """# Compute an epoch supervised loss estimate
             Z = tf.random.uniform((num_samples, self.R))
             X_hat= self.generator([Z, Y])
             X_hat_b = X_hat[:, :total_discrete]
             X_hat_b = tf.cast(tf.greater(X_hat_b, 0.5), X_hat_b.dtype)
             Y_hat = self.encoder(X_hat_b)
             Y_hat = tf.cast(tf.greater(Y_hat, 0.5), Y.dtype)
-            supervised_loss = tf.reduce_mean(tf.abs(Y-Y_hat))
+            supervised_loss = tf.reduce_mean(tf.abs(Y-Y_hat))"""
 
             # Append losses
             unsupervised_generator_losses.append(epoch_unsupervised_generator_loss)
             unsupervised_critic_losses.append(epoch_unsupervised_critic_loss)
             gradient_penalty_losses.append(epoch_gradient_penalty_loss)
-            supervised_losses.append(supervised_loss)
+            supervised_losses.append(epoch_supervised_loss)
 
             # Print the losses for this epoch
-            print(f'Epoch {epoch}: Supervised Loss = {supervised_loss} '
+            print(f'Epoch {epoch}: Supervised Loss = {epoch_supervised_loss} '
                     f'Unsupervised Loss G = {epoch_unsupervised_generator_loss} '
                     f'Unsupervised Loss C = {epoch_unsupervised_critic_loss} '
                     f'Gradient Penalty = {epoch_gradient_penalty_loss}')
