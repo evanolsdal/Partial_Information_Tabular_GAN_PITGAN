@@ -94,6 +94,11 @@ class PITGAN(Model):
 
         super().compile(*args, **kwargs)
 
+    # A quick set function to update parameters
+    def set_alpha_sup(self, alpha_sup):
+
+        self.alpha_sup = alpha_sup
+
     # Summarizes the model of all the network parts
     def get_summary(self):
 
