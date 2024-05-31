@@ -69,6 +69,8 @@ class PITGAN(Model):
         self.critic_steps = parameters.get('critic_steps')
         self.batch_size = parameters.get('batch_size')
         self.latent_sharpness = parameters.get('latent_sharpness')
+        self.dim_g = dim_g
+        self.dim_c = dim_c
         # decoder_dropout = parameters.get('decoder_dropout')
         
 
@@ -98,6 +100,12 @@ class PITGAN(Model):
     def set_alpha_sup(self, alpha_sup):
 
         self.alpha_sup = alpha_sup
+
+    # Function that resets the generative networks
+    def reset_generative(self):
+
+        self.generator = build_generator(self.R, self.L, self.D_list, self.C_list, self.dim_g)
+        self.critic = build_critic(self.D_list, self.C_list, self.dim_c, self.L)
 
     # Summarizes the model of all the network parts
     def get_summary(self):
